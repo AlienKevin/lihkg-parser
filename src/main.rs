@@ -1,15 +1,12 @@
 use html5ever::tree_builder::TreeSink;
 use lazy_static::lazy_static;
+use rayon::prelude::*;
 use regex::Regex;
-use scraper::node::Node;
-use scraper::{ElementRef, Html, Selector};
+use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::io::{BufRead, BufReader, Write};
 use tar::Archive;
 use xz2::read::XzDecoder;
 
@@ -149,49 +146,36 @@ fn process_line(line: &str, result: &mut String) -> Result<(), serde_json::Error
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tar_xz = File::open("./data/lihkg-1-1750000-csv.tar.xz")?;
+    let tar_xz = File::open("./data/lihkg-1800000-2800000-csv.tar.xz")?;
     let tar = XzDecoder::new(BufReader::new(tar_xz));
     let mut archive = Archive::new(tar);
 
     // Create or open the output file
-    let output_file = Arc::new(Mutex::new(File::create("sentences.txt")?));
-
-    let mut handles = vec![];
+    let mut output_file = File::create("sentences2.txt")?;
 
     for file in archive.entries()? {
         let file = file.unwrap();
-        let mut lines = Vec::new();
         let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line.unwrap();
-            lines.push(line);
-            if lines.len() >= 1000 {
-                let output_file = Arc::clone(&output_file);
-                let lines_to_process = std::mem::replace(&mut lines, Vec::new()); // Replace the current lines vector with a new one
-
-                // Spawn a new thread for each batch
-                let handle = std::thread::spawn(move || {
-                    let mut result = String::new();
-
-                    for line in lines_to_process {
-                        process_line(&line, &mut result).unwrap();
-                    }
-
-                    // Write to the output file
-                    output_file
-                        .lock()
-                        .unwrap()
-                        .write_all(result.as_bytes())
-                        .unwrap();
-                });
-                handles.push(handle);
-            }
-        }
-    }
-
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().expect("Thread panicked");
+        let result = reader
+            .lines()
+            .map(|line| line.unwrap())
+            .collect::<Vec<_>>()
+            .par_iter()
+            .fold(
+                || String::new(),
+                |mut buffer, line| {
+                    process_line(&line, &mut buffer).unwrap();
+                    buffer
+                },
+            )
+            .reduce(
+                || String::new(),
+                |mut buffer1, buffer2| {
+                    buffer1.push_str(&buffer2);
+                    buffer1
+                },
+            );
+        output_file.write_all(result.as_bytes()).unwrap();
     }
 
     Ok(())
